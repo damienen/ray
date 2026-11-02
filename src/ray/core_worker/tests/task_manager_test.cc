@@ -239,6 +239,7 @@ class TaskManagerTest : public ::testing::Test {
             fake_gcs_client_,
             fake_task_by_state_counter_,
             fake_total_lineage_bytes_gauge_,
+            fake_task_retry_submissions_counter_,
             /*free_actor_object_callback=*/[](const ObjectID &object_id) {},
             /*set_direct_transport_metadata=*/
             [](const ObjectID &, const std::string &) {},
@@ -288,6 +289,13 @@ class TaskManagerTest : public ::testing::Test {
         };
   }
 
+  double RecordedRetrySubmissions(const TaskSpecification &spec,
+                                  const std::string &reason) const {
+    const auto tag_to_value = fake_task_retry_submissions_counter_.GetTagToValue();
+    auto it = tag_to_value.find({{"Reason", reason}, {"Name", spec.GetName()}});
+    return it == tag_to_value.end() ? 0 : it->second;
+  }
+
   bool lineage_pinning_enabled_;
   bool did_queue_generator_resubmit_ = false;
   rpc::Address addr_;
@@ -311,6 +319,7 @@ class TaskManagerTest : public ::testing::Test {
   std::unordered_map<ObjectID, rpc::ErrorType> plasma_put_error_types_;
   ray::observability::FakeGauge fake_task_by_state_counter_;
   ray::observability::FakeGauge fake_total_lineage_bytes_gauge_;
+  ray::observability::FakeCounter fake_task_retry_submissions_counter_;
 };
 
 class TaskManagerLineageTest : public TaskManagerTest {
@@ -712,6 +721,9 @@ TEST_F(TaskManagerTest, TestTaskOomAndNonOomKillReturnsLastError) {
   error = rpc::ErrorType::WORKER_DIED;
   manager_.FailOrRetryPendingTask(spec.TaskId(), error);
   ASSERT_EQ(num_retries_, 2);
+  // Only the two attempts that were retried are counted, by failure reason.
+  ASSERT_EQ(RecordedRetrySubmissions(spec, "OUT_OF_MEMORY"), 1);
+  ASSERT_EQ(RecordedRetrySubmissions(spec, "WORKER_DIED"), 1);
 
   std::vector<std::shared_ptr<RayObject>> results;
   WorkerContext ctx(WorkerType::WORKER, WorkerID::FromRandom(), JobID::FromInt(0));
@@ -1379,6 +1391,7 @@ TEST_F(TaskManagerLineageTest, TestResubmitTask) {
   ASSERT_EQ(resubmitted_task_deps, spec.GetDependencyIds());
   ASSERT_EQ(num_retries_, 1);
   ASSERT_EQ(last_delay_ms_, 0);
+  ASSERT_EQ(RecordedRetrySubmissions(spec, "LINEAGE_RECONSTRUCTION"), 1);
   resubmitted_task_deps.clear();
 
   // The return ID goes out of scope.
@@ -1400,6 +1413,7 @@ TEST_F(TaskManagerLineageTest, TestResubmitTask) {
             rpc::ErrorType::OBJECT_UNRECONSTRUCTABLE_MAX_ATTEMPTS_EXCEEDED);
   ASSERT_TRUE(resubmitted_task_deps.empty());
   ASSERT_EQ(num_retries_, 1);
+  ASSERT_EQ(RecordedRetrySubmissions(spec, "LINEAGE_RECONSTRUCTION"), 1);
   ASSERT_EQ(reference_counter_->NumObjectIDsInScope(), 0);
 }
 
@@ -1705,6 +1719,7 @@ TEST_F(TaskManagerTest, PlasmaPut_ObjectStoreFull_FailsTaskAndWritesError) {
       fake_gcs_client_,
       fake_task_by_state_counter_,
       fake_total_lineage_bytes_gauge_,
+      fake_task_retry_submissions_counter_,
       /*free_actor_object_callback=*/[](const ObjectID &object_id) {},
       /*set_direct_transport_metadata=*/[](const ObjectID &, const std::string &) {},
       /*free_stale_unconsumed_generator_objects_async=*/
@@ -1779,6 +1794,7 @@ TEST_F(TaskManagerTest, PlasmaPut_TransientFull_RetriesThenSucceeds) {
       fake_gcs_client_,
       fake_task_by_state_counter_,
       fake_total_lineage_bytes_gauge_,
+      fake_task_retry_submissions_counter_,
       /*free_actor_object_callback=*/[](const ObjectID &object_id) {},
       /*set_direct_transport_metadata=*/[](const ObjectID &, const std::string &) {},
       /*free_stale_unconsumed_generator_objects_async=*/
@@ -1851,6 +1867,7 @@ TEST_F(TaskManagerTest, DynamicReturn_PlasmaPutFailure_FailsTaskImmediately) {
       fake_gcs_client_,
       fake_task_by_state_counter_,
       fake_total_lineage_bytes_gauge_,
+      fake_task_retry_submissions_counter_,
       /*free_actor_object_callback=*/[](const ObjectID &object_id) {},
       /*set_direct_transport_metadata=*/[](const ObjectID &, const std::string &) {},
       /*free_stale_unconsumed_generator_objects_async=*/
@@ -5425,6 +5442,7 @@ TEST_F(TaskManagerTest, TestRetryErrorMessageSentToCallback) {
       fake_gcs_client_,
       fake_task_by_state_counter_,
       fake_total_lineage_bytes_gauge_,
+      fake_task_retry_submissions_counter_,
       /*free_actor_object_callback=*/[](const ObjectID &object_id) {},
       /*set_direct_transport_metadata=*/[](const ObjectID &, const std::string &) {},
       /*free_stale_unconsumed_generator_objects_async=*/
@@ -5516,6 +5534,7 @@ TEST_F(TaskManagerTest, TestErrorLogWhenPushErrorCallbackFails) {
       fake_gcs_client_,
       fake_task_by_state_counter_,
       fake_total_lineage_bytes_gauge_,
+      fake_task_retry_submissions_counter_,
       /*free_actor_object_callback=*/[](const ObjectID &object_id) {},
       /*set_direct_transport_metadata=*/[](const ObjectID &, const std::string &) {},
       /*free_stale_unconsumed_generator_objects_async=*/
